@@ -1,3 +1,7 @@
+
+import { useEffect, useState } from "react";
+import API from "../services/api";
+
 import {
   ShieldCheck,
   Server,
@@ -7,6 +11,22 @@ import {
 } from "lucide-react";
 
 function Dashboard() {
+  const [backendStatus, setBackendStatus] = useState("Checking...");
+
+  useEffect(() => {
+    const checkBackend = async () => {
+      try {
+        await API.get("/status");
+        setBackendStatus("Connected");
+      } catch (error) {
+        console.error("Backend connection failed:", error);
+        setBackendStatus("Unavailable");
+      }
+    };
+
+    checkBackend();
+  }, []);
+
   const stats = [
     {
       title: "Total Assets",
@@ -46,14 +66,31 @@ function Dashboard() {
         <h1 className="text-2xl font-bold text-slate-800">
           Security Overview
         </h1>
+
         <p className="text-slate-500 mt-2">
           Monitor your organization's post-quantum cryptography readiness.
         </p>
+
+        {/* Backend Connection Status */}
+        <div className="mt-4 flex items-center gap-2">
+          <span
+            className={`h-2.5 w-2.5 rounded-full ${
+              backendStatus === "Connected"
+                ? "bg-green-500"
+                : backendStatus === "Unavailable"
+                ? "bg-red-500"
+                : "bg-amber-400"
+            }`}
+          ></span>
+
+          <span className="text-sm text-slate-600">
+            Backend Status: <strong>{backendStatus}</strong>
+          </span>
+        </div>
       </div>
 
       {/* Statistics Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-6">
-
         {stats.map((stat) => {
           const Icon = stat.icon;
 
@@ -63,7 +100,6 @@ function Dashboard() {
               className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm"
             >
               <div className="flex items-center justify-between">
-
                 <div>
                   <p className="text-sm text-slate-500">
                     {stat.title}
@@ -77,7 +113,6 @@ function Dashboard() {
                 <div className="p-3 rounded-lg bg-slate-100 text-blue-600">
                   <Icon size={25} />
                 </div>
-
               </div>
 
               <p className="text-xs text-slate-500 mt-4">
@@ -86,7 +121,6 @@ function Dashboard() {
             </div>
           );
         })}
-
       </div>
 
       {/* Security Status */}
@@ -126,10 +160,12 @@ function Dashboard() {
 
             <div className="flex items-start gap-3">
               <AlertTriangle className="text-amber-500 mt-1" size={20} />
+
               <div>
                 <p className="text-sm font-medium text-slate-800">
                   Identify vulnerable algorithms
                 </p>
+
                 <p className="text-xs text-slate-500 mt-1">
                   Review systems using RSA and ECC.
                 </p>
@@ -138,10 +174,12 @@ function Dashboard() {
 
             <div className="flex items-start gap-3">
               <ShieldCheck className="text-blue-600 mt-1" size={20} />
+
               <div>
                 <p className="text-sm font-medium text-slate-800">
                   Prepare migration strategy
                 </p>
+
                 <p className="text-xs text-slate-500 mt-1">
                   Prioritize assets for post-quantum migration.
                 </p>
@@ -150,10 +188,12 @@ function Dashboard() {
 
             <div className="flex items-start gap-3">
               <ArrowUpRight className="text-green-600 mt-1" size={20} />
+
               <div>
                 <p className="text-sm font-medium text-slate-800">
                   Monitor migration progress
                 </p>
+
                 <p className="text-xs text-slate-500 mt-1">
                   Track your organization's security improvements.
                 </p>
@@ -164,7 +204,6 @@ function Dashboard() {
         </div>
 
       </div>
-
     </div>
   );
 }

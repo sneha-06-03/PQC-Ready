@@ -1,130 +1,230 @@
 
-import { useState } from "react";
-import { Search, Plus, Filter, Server, ShieldAlert } from "lucide-react";
+import { useState, useEffect } from "react";
+import {
+  Search,
+  Plus,
+  Filter,
+  Server,
+  ShieldAlert,
+} from "lucide-react";
+import API from "../services/api";
 
 function AssetInventory() {
   const [searchTerm, setSearchTerm] = useState("");
   const [riskFilter, setRiskFilter] = useState("All");
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingAsset, setEditingAsset] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [assets, setAssets] = useState([]);
 
-  const [assets, setAssets] = useState([
-    {
-      id: 1,
-      name: "Payment Gateway",
-      type: "Application",
-      algorithm: "RSA-2048",
-      risk: "High",
-      status: "Needs Migration",
-    },
-    {
-      id: 2,
-      name: "Customer Database",
-      type: "Database",
-      algorithm: "ECC",
-      risk: "High",
-      status: "Needs Migration",
-    },
-    {
-      id: 3,
-      name: "Internal API",
-      type: "API",
-      algorithm: "AES-256",
-      risk: "Low",
-      status: "Protected",
-    },
-    {
-      id: 4,
-      name: "Web Server",
-      type: "Server",
-      algorithm: "RSA-3072",
-      risk: "Medium",
-      status: "Under Review",
-    },
-  ]);
+  // Convert backend asset data into the format used by the frontend.
+  const formatAsset = (asset, index) => ({
+    id: asset.id || `${asset.asset_name}-${index}`,
+    name: asset.asset_name,
+    type: asset.asset_type || "Other",
+    algorithm: asset.algorithm,
+    keyLength: asset.key_length,
+    dataSensitivity: asset.data_sensitivity,
+    migrationStatus: asset.pqc_migration_status,
+    risk:
+      asset.data_sensitivity?.charAt(0).toUpperCase() +
+      asset.data_sensitivity?.slice(1),
+    status:
+      asset.pqc_migration_status === "completed"
+        ? "Protected"
+        : asset.pqc_migration_status === "in_progress"
+          ? "In Progress"
+          : "Needs Migration",
+    riskScore: asset.pqc_risk_score ?? null,
+  });
 
-  const handleAddAsset = (e) => {
-  e.preventDefault();
+  // Fetch saved assets when the page opens.
+  useEffect(() => {
+    const fetchAssets = async () => {
+      try {
+        setLoading(true);
+        setError("");
 
-  const formData = new FormData(e.target);
+        const response = await API.get("/assets");
 
-  const newAsset = {
-    id: editingAsset ? editingAsset.id : Date.now(),
-    name: formData.get("name"),
-    type: formData.get("type"),
-    algorithm: formData.get("algorithm"),
-    risk: formData.get("risk"),
-    status: editingAsset ? editingAsset.status : "Under Review",
+        const backendAssets = response.data.assets || [];
+
+        const formattedAssets = backendAssets
+          .filter((asset) => asset.asset_name)
+          .map((asset, index) => formatAsset(asset, index));
+
+        setAssets(formattedAssets);
+      } catch (err) {
+        console.error("Could not fetch assets:", err);
+        setError(
+          err.response?.data?.detail ||
+          "Could not load assets from the backend."
+        );
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchAssets();
+  }, []);
+
+  // Add a new asset or edit an existing one.
+  const handleAddAsset = async (e) => {
+    e.preventDefault();
+    setError("");
+
+    const formData = new FormData(e.target);
+
+    const payload = {
+      asset_name: formData.get("name"),
+      algorithm: formData.get("algorithm"),
+      key_length: Number(formData.get("key_length")),
+      data_sensitivity: formData.get("data_sensitivity"),
+      pqc_migration_status: formData.get("pqc_migration_status"),
+    };
+
+    const assetType = formData.get("type");
+
+    try {
+      setLoading(true);
+
+      let newAsset;
+
+      if (editingAsset) {
+        // The current backend does not have a confirmed update endpoint.
+        // Keep edits in frontend state for now.
+        newAsset = {
+          ...editingAsset,
+          name: payload.asset_name,
+          type: assetType,
+          algorithm: payload.algorithm,
+          keyLength: payload.key_length,
+          dataSensitivity: payload.data_sensitivity,
+          migrationStatus: payload.pqc_migration_status,
+          risk: payload.data_sensitivity.charAt(0).toUpperCase() +
+            payload.data_sensitivity.slice(1),
+          status:
+            payload.pqc_migration_status === "completed"
+              ? "Protected"
+              : payload.pqc_migration_status === "in_progress"
+                ? "In Progress"
+                : "Needs Migration",
+        };
+
+        setAssets((previousAssets) =>
+          previousAssets.map((asset) =>
+            asset.id === editingAsset.id ? newAsset : asset
+          )
+        );
+      } else {
+        // Save the new asset directly to the backend.
+        const response = await API.post("/assets", payload);
+
+        const result = response.data;
+
+        if (result.status !== "success") {
+          throw new Error(
+            result.message || "The backend could not save the asset."
+          );
+        }
+
+        const savedAsset = result.asset || payload;
+
+        newAsset = {
+          ...formatAsset(savedAsset, Date.now()),
+          id: Date.now(),
+          type: assetType,
+          riskScore:
+            savedAsset.pqc_risk_score ??
+            result.pqc_risk_score ??
+            null,
+        };
+
+        setAssets((previousAssets) => [
+          ...previousAssets,
+          newAsset,
+        ]);
+      }
+
+      setShowAddForm(false);
+      setEditingAsset(null);
+      e.target.reset();
+      setSearchTerm("");
+      setRiskFilter("All");
+    } catch (err) {
+      console.error("Asset saving failed:", err);
+
+      setError(
+        err.response?.data?.detail ||
+        err.response?.data?.message ||
+        err.message ||
+        "Could not save the asset. Please try again."
+      );
+    } finally {
+      setLoading(false);
+    }
   };
 
-  if (editingAsset) {
-    setAssets((previousAssets) =>
-      previousAssets.map((asset) =>
-        asset.id === editingAsset.id ? newAsset : asset
-      )
-    );
-  } else {
-    setAssets((previousAssets) => [...previousAssets, newAsset]);
-  }
+  // Search and filter assets.
+  const filteredAssets = assets.filter((asset) => {
+    const matchesSearch =
+      `${asset.name} ${asset.type} ${asset.algorithm}`
+        .toLowerCase()
+        .includes(searchTerm.toLowerCase());
 
-  setShowAddForm(false);
-  setEditingAsset(null);
-  e.target.reset();
-  setSearchTerm("");
-  setRiskFilter("All");
-};
+    const matchesRisk =
+      riskFilter === "All" || asset.risk === riskFilter;
 
- 
- const filteredAssets = assets.filter((asset) => {
-  const matchesSearch = `${asset.name} ${asset.type} ${asset.algorithm}`
-    .toLowerCase()
-    .includes(searchTerm.toLowerCase());
-
-  const matchesRisk =
-    riskFilter === "All" || asset.risk === riskFilter;
-
-  return matchesSearch && matchesRisk;
-});
+    return matchesSearch && matchesRisk;
+  });
 
   return (
     <div className="p-8 space-y-6">
 
+      {/* Page Heading */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">
             Asset Inventory
           </h1>
+
           <p className="text-sm text-slate-500 mt-2">
             Manage and monitor your organization's cryptographic assets.
           </p>
         </div>
 
-       <button
- onClick={() => {
-  setEditingAsset(null);
-  setShowAddForm(true);
-}}
-  className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-lg text-sm font-medium"
->
-  <Plus size={18} />
-  Add New Asset
-</button>
+        <button
+          onClick={() => {
+            setEditingAsset(null);
+            setError("");
+            setShowAddForm(true);
+          }}
+          className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-lg text-sm font-medium"
+        >
+          <Plus size={18} />
+          Add New Asset
+        </button>
       </div>
 
-
-      {/* Add Asset Form */}
+      {/* Add / Edit Asset Form */}
       {showAddForm && (
         <div className="bg-white border border-slate-200 rounded-xl p-6">
           <h3 className="text-lg font-semibold text-slate-800 mb-5">
-  {editingAsset ? "Edit Cryptographic Asset" : "Add New Cryptographic Asset"}
-</h3>
+            {editingAsset
+              ? "Edit Cryptographic Asset"
+              : "Add New Cryptographic Asset"}
+          </h3>
 
-          <form onSubmit={handleAddAsset} className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-
+          <form
+            onSubmit={handleAddAsset}
+            className="grid grid-cols-1 sm:grid-cols-2 gap-5"
+          >
             <div>
               <label className="block text-sm font-medium mb-2">
                 Asset Name
               </label>
+
               <input
                 name="name"
                 type="text"
@@ -139,6 +239,7 @@ function AssetInventory() {
               <label className="block text-sm font-medium mb-2">
                 Asset Type
               </label>
+
               <select
                 name="type"
                 defaultValue={editingAsset ? editingAsset.type : ""}
@@ -157,6 +258,7 @@ function AssetInventory() {
               <label className="block text-sm font-medium mb-2">
                 Cryptographic Algorithm
               </label>
+
               <input
                 name="algorithm"
                 type="text"
@@ -169,61 +271,129 @@ function AssetInventory() {
 
             <div>
               <label className="block text-sm font-medium mb-2">
-                Risk Level
+                Key Length
               </label>
+
+              <input
+                name="key_length"
+                type="number"
+                min="1"
+                placeholder="e.g. 2048"
+                defaultValue={editingAsset ? editingAsset.keyLength : ""}
+                required
+                className="w-full border border-slate-200 rounded-lg p-3 text-sm outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">
+                Data Sensitivity
+              </label>
+
               <select
-                name="risk"
-                defaultValue={editingAsset ? editingAsset.risk : "High"}
+                name="data_sensitivity"
+                defaultValue={
+                  editingAsset ? editingAsset.dataSensitivity : "high"
+                }
                 required
                 className="w-full border border-slate-200 rounded-lg p-3 text-sm"
               >
-                <option value="High">High</option>
-                <option value="Medium">Medium</option>
-                <option value="Low">Low</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
               </select>
             </div>
+
+            <div>
+              <label className="block text-sm font-medium mb-2">
+                PQC Migration Status
+              </label>
+
+              <select
+                name="pqc_migration_status"
+                defaultValue={
+                  editingAsset ? editingAsset.migrationStatus : "pending"
+                }
+                required
+                className="w-full border border-slate-200 rounded-lg p-3 text-sm"
+              >
+                <option value="pending">Pending</option>
+                <option value="in_progress">In Progress</option>
+                <option value="completed">Completed</option>
+              </select>
+            </div>
+
+            {error && (
+              <div className="sm:col-span-2 bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm">
+                {error}
+              </div>
+            )}
 
             <div className="sm:col-span-2 flex gap-3">
               <button
                 type="submit"
-                className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-lg text-sm font-medium"
+                disabled={loading}
+                className="bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white px-5 py-3 rounded-lg text-sm font-medium"
               >
-                {editingAsset ? "Update Asset" : "Save Asset"}
+                {loading
+                  ? "Saving..."
+                  : editingAsset
+                    ? "Update Asset"
+                    : "Save Asset"}
               </button>
 
               <button
                 type="button"
-               onClick={() => {
-  setShowAddForm(false);
-  setEditingAsset(null);
-}}
+                onClick={() => {
+                  setShowAddForm(false);
+                  setEditingAsset(null);
+                  setError("");
+                }}
                 className="border border-slate-200 px-5 py-3 rounded-lg text-sm text-slate-600"
               >
                 Cancel
               </button>
             </div>
-
           </form>
         </div>
       )}
 
+      {/* Loading and Error Messages */}
+      {loading && !showAddForm && (
+        <p className="text-sm text-blue-600">
+          Loading assets from the backend...
+        </p>
+      )}
 
+      {error && !showAddForm && (
+        <div className="bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm">
+          {error}
+        </div>
+      )}
+
+      {/* Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
         <div className="bg-white p-5 rounded-xl border border-slate-200">
           <p className="text-sm text-slate-500">Total Assets</p>
-          <h2 className="text-2xl font-bold mt-2 text-slate-800">{assets.length}</h2>
+          <h2 className="text-2xl font-bold mt-2 text-slate-800">
+            {assets.length}
+          </h2>
         </div>
 
         <div className="bg-white p-5 rounded-xl border border-slate-200">
-          <p className="text-sm text-slate-500">High Risk Assets</p>
-          <h2 className="text-2xl font-bold mt-2 text-red-600">{assets.filter((asset) => asset.risk === "High").length}</h2>
+          <p className="text-sm text-slate-500">
+            High Sensitivity Assets
+          </p>
+          <h2 className="text-2xl font-bold mt-2 text-red-600">
+            {assets.filter((asset) => asset.risk === "High").length}
+          </h2>
         </div>
 
         <div className="bg-white p-5 rounded-xl border border-slate-200">
           <p className="text-sm text-slate-500">Protected Assets</p>
           <h2 className="text-2xl font-bold mt-2 text-green-600">
-  {assets.filter((asset) => asset.status === "Protected").length}
-</h2>
+            {assets.filter((asset) => asset.status === "Protected").length}
+          </h2>
         </div>
       </div>
 
@@ -242,19 +412,19 @@ function AssetInventory() {
         </div>
 
         <div className="flex items-center gap-2 border border-slate-200 rounded-lg px-4 py-2">
-  <Filter size={18} className="text-slate-500" />
+          <Filter size={18} className="text-slate-500" />
 
-  <select
-    value={riskFilter}
-    onChange={(e) => setRiskFilter(e.target.value)}
-    className="outline-none text-sm text-slate-600 bg-white"
-  >
-    <option value="All">All Risks</option>
-    <option value="High">High Risk</option>
-    <option value="Medium">Medium Risk</option>
-    <option value="Low">Low Risk</option>
-  </select>
-</div>
+          <select
+            value={riskFilter}
+            onChange={(e) => setRiskFilter(e.target.value)}
+            className="outline-none text-sm text-slate-600 bg-white"
+          >
+            <option value="All">All Sensitivities</option>
+            <option value="High">High Sensitivity</option>
+            <option value="Medium">Medium Sensitivity</option>
+            <option value="Low">Low Sensitivity</option>
+          </select>
+        </div>
       </div>
 
       {/* Asset Table */}
@@ -263,6 +433,7 @@ function AssetInventory() {
           <h3 className="font-semibold text-slate-800">
             Cryptographic Assets
           </h3>
+
           <p className="text-xs text-slate-500 mt-1">
             Showing {filteredAssets.length} matching assets
           </p>
@@ -275,7 +446,8 @@ function AssetInventory() {
                 <th className="px-6 py-4">Asset Name</th>
                 <th className="px-6 py-4">Asset Type</th>
                 <th className="px-6 py-4">Algorithm</th>
-                <th className="px-6 py-4">Risk Level</th>
+                <th className="px-6 py-4">Sensitivity</th>
+                <th className="px-6 py-4">PQC Risk Score</th>
                 <th className="px-6 py-4">Status</th>
                 <th className="px-6 py-4">Actions</th>
               </tr>
@@ -290,6 +462,7 @@ function AssetInventory() {
                         <div className="p-2 bg-blue-50 rounded-lg text-blue-600">
                           <Server size={18} />
                         </div>
+
                         <span className="font-medium text-sm text-slate-800">
                           {asset.name}
                         </span>
@@ -305,15 +478,23 @@ function AssetInventory() {
                     </td>
 
                     <td className="px-6 py-4">
-                      <span className={`px-3 py-1 rounded-full text-xs font-medium ${
-                        asset.risk === "High"
-                          ? "bg-red-100 text-red-700"
-                          : asset.risk === "Medium"
-                          ? "bg-amber-100 text-amber-700"
-                          : "bg-green-100 text-green-700"
-                      }`}>
+                      <span
+                        className={`px-3 py-1 rounded-full text-xs font-medium ${
+                          asset.risk === "High"
+                            ? "bg-red-100 text-red-700"
+                            : asset.risk === "Medium"
+                              ? "bg-amber-100 text-amber-700"
+                              : "bg-green-100 text-green-700"
+                        }`}
+                      >
                         {asset.risk}
                       </span>
+                    </td>
+
+                    <td className="px-6 py-4 text-sm font-semibold text-slate-700">
+                      {asset.riskScore !== null
+                        ? `${asset.riskScore}/100`
+                        : "Not assessed"}
                     </td>
 
                     <td className="px-6 py-4">
@@ -322,40 +503,49 @@ function AssetInventory() {
                         {asset.status}
                       </span>
                     </td>
-                   <td className="px-6 py-4">
-  <button
-    onClick={() => {
-      const confirmDelete = window.confirm(
-        "Are you sure you want to delete this asset?"
-      );
 
-      if (confirmDelete) {
-        setAssets((previousAssets) =>
-          previousAssets.filter((item) => item.id !== asset.id)
-        );
-      }
-    }}
-    className="text-red-600 hover:text-red-800 text-sm font-medium"
-  >
-    Delete
-  </button>
+                    <td className="px-6 py-4">
+                      <button
+                        onClick={() => {
+                          const confirmDelete = window.confirm(
+                            "Are you sure you want to delete this asset?"
+                          );
 
-  <button
-    onClick={() => {
-  setEditingAsset(asset);
-  setShowAddForm(true);
-}}
-    className="text-blue-600 hover:text-blue-800 text-sm font-medium ml-3"
-  >
-    Edit
-  </button>
-</td>
+                          if (confirmDelete) {
+                            setAssets((previousAssets) =>
+                              previousAssets.filter(
+                                (item) => item.id !== asset.id
+                              )
+                            );
+                          }
+                        }}
+                        className="text-red-600 hover:text-red-800 text-sm font-medium"
+                      >
+                        Delete
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          setEditingAsset(asset);
+                          setError("");
+                          setShowAddForm(true);
+                        }}
+                        className="text-blue-600 hover:text-blue-800 text-sm font-medium ml-3"
+                      >
+                        Edit
+                      </button>
+                    </td>
                   </tr>
                 ))
               ) : (
                 <tr>
-                  <td colSpan="5" className="text-center py-8 text-slate-500 text-sm">
-                    No matching assets found.
+                  <td
+                    colSpan="7"
+                    className="text-center py-8 text-slate-500 text-sm"
+                  >
+                    {loading
+                      ? "Loading assets..."
+                      : "No matching assets found."}
                   </td>
                 </tr>
               )}
