@@ -1,5 +1,6 @@
 
 import { useState, useEffect } from "react";
+
 import {
   Search,
   Plus,
@@ -7,6 +8,7 @@ import {
   Server,
   ShieldAlert,
 } from "lucide-react";
+
 import API from "../services/api";
 
 function AssetInventory() {
@@ -18,45 +20,57 @@ function AssetInventory() {
   const [error, setError] = useState("");
   const [assets, setAssets] = useState([]);
 
-  // Convert backend asset data into the format used by the frontend.
-  const formatAsset = (asset, index) => ({
-    id: asset.id || `${asset.asset_name}-${index}`,
-    name: asset.asset_name,
-    type: asset.asset_type || "Other",
-    algorithm: asset.algorithm,
-    keyLength: asset.key_length,
-    dataSensitivity: asset.data_sensitivity,
-    migrationStatus: asset.pqc_migration_status,
-    risk:
-      asset.data_sensitivity?.charAt(0).toUpperCase() +
-      asset.data_sensitivity?.slice(1),
-    status:
-      asset.pqc_migration_status === "completed"
-        ? "Protected"
-        : asset.pqc_migration_status === "in_progress"
-          ? "In Progress"
-          : "Needs Migration",
-    riskScore: asset.pqc_risk_score ?? null,
-  });
+  // Convert backend data into frontend format.
+  const formatAsset = (asset, index) => {
+    const sensitivity = asset.data_sensitivity || "medium";
+    const migrationStatus =
+      asset.pqc_migration_status || "pending";
 
-  // Fetch saved assets when the page opens.
+    return {
+      id: asset.id ?? `${asset.name || asset.asset_name}-${index}`,
+      backendId: asset.id ?? null,
+      name: asset.name || asset.asset_name || "Unnamed Asset",
+      type: asset.category || asset.asset_type || "Other",
+      algorithm: asset.algorithm || "Not specified",
+      keyLength: asset.key_length || "",
+      dataSensitivity: sensitivity,
+      migrationStatus,
+      system: asset.system || "",
+      risk:
+        sensitivity.charAt(0).toUpperCase() +
+        sensitivity.slice(1),
+      status:
+        migrationStatus === "completed"
+          ? "Protected"
+          : migrationStatus === "in_progress"
+            ? "In Progress"
+            : "Needs Migration",
+      riskScore: asset.pqc_risk_score ?? null,
+    };
+  };
+
+  // Fetch assets from backend.
+  const fetchAssets = async () => {
+    const response = await API.get("/assets");
+
+    const backendAssets = response.data.assets || [];
+
+    const formattedAssets = backendAssets
+      .filter((asset) => asset.name || asset.asset_name)
+      .map((asset, index) => formatAsset(asset, index));
+
+    setAssets(formattedAssets);
+  };
+
   useEffect(() => {
-    const fetchAssets = async () => {
+    const loadAssets = async () => {
       try {
         setLoading(true);
         setError("");
-
-        const response = await API.get("/assets");
-
-        const backendAssets = response.data.assets || [];
-
-        const formattedAssets = backendAssets
-          .filter((asset) => asset.asset_name)
-          .map((asset, index) => formatAsset(asset, index));
-
-        setAssets(formattedAssets);
+        await fetchAssets();
       } catch (err) {
         console.error("Could not fetch assets:", err);
+
         setError(
           err.response?.data?.detail ||
           "Could not load assets from the backend."
@@ -66,92 +80,71 @@ function AssetInventory() {
       }
     };
 
-    fetchAssets();
+    loadAssets();
   }, []);
 
-  // Add a new asset or edit an existing one.
+  // Add a new asset or update an existing asset.
   const handleAddAsset = async (e) => {
     e.preventDefault();
+
     setError("");
 
     const formData = new FormData(e.target);
 
-    const payload = {
-      asset_name: formData.get("name"),
-      algorithm: formData.get("algorithm"),
-      key_length: Number(formData.get("key_length")),
-      data_sensitivity: formData.get("data_sensitivity"),
-      pqc_migration_status: formData.get("pqc_migration_status"),
-    };
-
-    const assetType = formData.get("type");
+    const name = formData.get("name");
+    const category = formData.get("type");
+    const algorithm = formData.get("algorithm");
+    const system = formData.get("system");
 
     try {
       setLoading(true);
 
-      let newAsset;
-
       if (editingAsset) {
-        // The current backend does not have a confirmed update endpoint.
-        // Keep edits in frontend state for now.
-        newAsset = {
-          ...editingAsset,
-          name: payload.asset_name,
-          type: assetType,
-          algorithm: payload.algorithm,
-          keyLength: payload.key_length,
-          dataSensitivity: payload.data_sensitivity,
-          migrationStatus: payload.pqc_migration_status,
-          risk: payload.data_sensitivity.charAt(0).toUpperCase() +
-            payload.data_sensitivity.slice(1),
-          status:
-            payload.pqc_migration_status === "completed"
-              ? "Protected"
-              : payload.pqc_migration_status === "in_progress"
-                ? "In Progress"
-                : "Needs Migration",
-        };
-
-        setAssets((previousAssets) =>
-          previousAssets.map((asset) =>
-            asset.id === editingAsset.id ? newAsset : asset
-          )
-        );
-      } else {
-        // Save the new asset directly to the backend.
-        const response = await API.post("/assets", payload);
-
-        const result = response.data;
-
-        if (result.status !== "success") {
+        // PUT request: update an existing backend asset.
+        if (editingAsset.backendId === null) {
           throw new Error(
-            result.message || "The backend could not save the asset."
+            "This asset does not have a valid backend ID. Refresh the inventory and try again."
           );
         }
 
-        const savedAsset = result.asset || payload;
-
-        newAsset = {
-          ...formatAsset(savedAsset, Date.now()),
-          id: Date.now(),
-          type: assetType,
-          riskScore:
-            savedAsset.pqc_risk_score ??
-            result.pqc_risk_score ??
-            null,
+        const updatePayload = {
+          name,
+          algorithm,
+          category,
+          system,
         };
 
-        setAssets((previousAssets) => [
-          ...previousAssets,
-          newAsset,
-        ]);
+        await API.put(
+          `/assets/${editingAsset.backendId}`,
+          updatePayload
+        );
+
+        // Refresh the inventory after successful update.
+        await fetchAssets();
+
+      } else {
+        // POST request: add a new asset.
+        const payload = {
+          asset_name: name,
+          algorithm,
+          key_length: Number(formData.get("key_length")),
+          data_sensitivity: formData.get("data_sensitivity"),
+          pqc_migration_status: formData.get(
+            "pqc_migration_status"
+          ),
+        };
+
+        await API.post("/assets", payload);
+
+        // Fetch the backend-generated ID and saved data.
+        await fetchAssets();
       }
 
       setShowAddForm(false);
       setEditingAsset(null);
-      e.target.reset();
       setSearchTerm("");
       setRiskFilter("All");
+
     } catch (err) {
       console.error("Asset saving failed:", err);
 
@@ -159,14 +152,54 @@ function AssetInventory() {
         err.response?.data?.detail ||
         err.response?.data?.message ||
         err.message ||
-        "Could not save the asset. Please try again."
+        "Could not save the asset."
       );
     } finally {
       setLoading(false);
     }
   };
 
-  // Search and filter assets.
+  // Delete an asset through the backend.
+  const handleDeleteAsset = async (asset) => {
+    const confirmDelete = window.confirm(
+      `Are you sure you want to delete "${asset.name}"?`
+    );
+
+    if (!confirmDelete) return;
+
+    if (asset.backendId === null) {
+      setError(
+        "This asset does not have a valid backend ID. Refresh the inventory and try again."
+      );
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError("");
+
+      await API.delete(`/assets/${asset.backendId}`);
+
+      setAssets((previousAssets) =>
+        previousAssets.filter(
+          (item) => item.backendId !== asset.backendId
+        )
+      );
+
+    } catch (err) {
+      console.error("Asset deletion failed:", err);
+
+      setError(
+        err.response?.data?.detail ||
+        err.response?.data?.message ||
+        "Could not delete the asset from the backend."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Search and filter.
   const filteredAssets = assets.filter((asset) => {
     const matchesSearch =
       `${asset.name} ${asset.type} ${asset.algorithm}`
@@ -207,7 +240,7 @@ function AssetInventory() {
         </button>
       </div>
 
-      {/* Add / Edit Asset Form */}
+      {/* Add / Edit Form */}
       {showAddForm && (
         <div className="bg-white border border-slate-200 rounded-xl p-6">
           <h3 className="text-lg font-semibold text-slate-800 mb-5">
@@ -229,7 +262,7 @@ function AssetInventory() {
                 name="name"
                 type="text"
                 placeholder="Enter asset name"
-                defaultValue={editingAsset ? editingAsset.name : ""}
+                defaultValue={editingAsset?.name || ""}
                 required
                 className="w-full border border-slate-200 rounded-lg p-3 text-sm outline-none"
               />
@@ -237,20 +270,23 @@ function AssetInventory() {
 
             <div>
               <label className="block text-sm font-medium mb-2">
-                Asset Type
+                Category
               </label>
 
               <select
                 name="type"
-                defaultValue={editingAsset ? editingAsset.type : ""}
+                defaultValue={editingAsset?.type || ""}
                 required
                 className="w-full border border-slate-200 rounded-lg p-3 text-sm"
               >
-                <option value="">Select type</option>
+                <option value="">Select category</option>
+                <option value="Asymmetric">Asymmetric</option>
+                <option value="Digital Signature">Digital Signature</option>
                 <option value="Application">Application</option>
                 <option value="Database">Database</option>
                 <option value="API">API</option>
                 <option value="Server">Server</option>
+                <option value="Other">Other</option>
               </select>
             </div>
 
@@ -263,7 +299,7 @@ function AssetInventory() {
                 name="algorithm"
                 type="text"
                 placeholder="e.g. RSA-2048"
-                defaultValue={editingAsset ? editingAsset.algorithm : ""}
+                defaultValue={editingAsset?.algorithm || ""}
                 required
                 className="w-full border border-slate-200 rounded-lg p-3 text-sm outline-none"
               />
@@ -271,57 +307,71 @@ function AssetInventory() {
 
             <div>
               <label className="block text-sm font-medium mb-2">
-                Key Length
+                System
               </label>
 
               <input
-                name="key_length"
-                type="number"
-                min="1"
-                placeholder="e.g. 2048"
-                defaultValue={editingAsset ? editingAsset.keyLength : ""}
+                name="system"
+                type="text"
+                placeholder="e.g. Auth Gateway"
+                defaultValue={editingAsset?.system || ""}
                 required
                 className="w-full border border-slate-200 rounded-lg p-3 text-sm outline-none"
               />
             </div>
 
-            <div>
-              <label className="block text-sm font-medium mb-2">
-                Data Sensitivity
-              </label>
+            {!editingAsset && (
+              <>
+                <div>
+                  <label className="block text-sm font-medium mb-2">
+                    Key Length
+                  </label>
 
-              <select
-                name="data_sensitivity"
-                defaultValue={
-                  editingAsset ? editingAsset.dataSensitivity : "high"
-                }
-                required
-                className="w-full border border-slate-200 rounded-lg p-3 text-sm"
-              >
-                <option value="high">High</option>
-                <option value="medium">Medium</option>
-                <option value="low">Low</option>
-              </select>
-            </div>
+                  <input
+                    name="key_length"
+                    type="number"
+                    min="1"
+                    placeholder="e.g. 2048"
+                    required
+                    className="w-full border border-slate-200 rounded-lg p-3 text-sm outline-none"
+                  />
+                </div>
 
-            <div>
-              <label className="block text-sm font-medium mb-2">
-                PQC Migration Status
-              </label>
+                <div>
+                  <label className="block text-sm font-medium mb-2">
+                    Data Sensitivity
+                  </label>
 
-              <select
-                name="pqc_migration_status"
-                defaultValue={
-                  editingAsset ? editingAsset.migrationStatus : "pending"
-                }
-                required
-                className="w-full border border-slate-200 rounded-lg p-3 text-sm"
-              >
-                <option value="pending">Pending</option>
-                <option value="in_progress">In Progress</option>
-                <option value="completed">Completed</option>
-              </select>
-            </div>
+                  <select
+                    name="data_sensitivity"
+                    defaultValue="high"
+                    required
+                    className="w-full border border-slate-200 rounded-lg p-3 text-sm"
+                  >
+                    <option value="high">High</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium mb-2">
+                    PQC Migration Status
+                  </label>
+
+                  <select
+                    name="pqc_migration_status"
+                    defaultValue="pending"
+                    required
+                    className="w-full border border-slate-200 rounded-lg p-3 text-sm"
+                  >
+                    <option value="pending">Pending</option>
+                    <option value="in_progress">In Progress</option>
+                    <option value="completed">Completed</option>
+                  </select>
+                </div>
+              </>
+            )}
 
             {error && (
               <div className="sm:col-span-2 bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm">
@@ -361,7 +411,7 @@ function AssetInventory() {
       {/* Loading and Error Messages */}
       {loading && !showAddForm && (
         <p className="text-sm text-blue-600">
-          Loading assets from the backend...
+          Processing request...
         </p>
       )}
 
@@ -504,22 +554,11 @@ function AssetInventory() {
                       </span>
                     </td>
 
-                    <td className="px-6 py-4">
+                    <td className="px-6 py-4 whitespace-nowrap">
                       <button
-                        onClick={() => {
-                          const confirmDelete = window.confirm(
-                            "Are you sure you want to delete this asset?"
-                          );
-
-                          if (confirmDelete) {
-                            setAssets((previousAssets) =>
-                              previousAssets.filter(
-                                (item) => item.id !== asset.id
-                              )
-                            );
-                          }
-                        }}
-                        className="text-red-600 hover:text-red-800 text-sm font-medium"
+                        onClick={() => handleDeleteAsset(asset)}
+                        disabled={loading}
+                        className="text-red-600 hover:text-red-800 disabled:opacity-50 text-sm font-medium"
                       >
                         Delete
                       </button>
