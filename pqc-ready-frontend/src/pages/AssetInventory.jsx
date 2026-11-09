@@ -36,24 +36,62 @@ function AssetInventory() {
       dataSensitivity: sensitivity,
       migrationStatus,
       system: asset.system || "",
+
       risk:
         sensitivity.charAt(0).toUpperCase() +
         sensitivity.slice(1),
+
       status:
         migrationStatus === "completed"
           ? "Protected"
           : migrationStatus === "in_progress"
             ? "In Progress"
             : "Needs Migration",
+
       riskScore: asset.pqc_risk_score ?? null,
     };
+  };
+
+  // Convert backend errors into readable text.
+  const getErrorMessage = (err, fallback) => {
+    const detail = err.response?.data?.detail;
+    const message = err.response?.data?.message;
+
+    if (typeof detail === "string") {
+      return detail;
+    }
+
+    if (Array.isArray(detail)) {
+      return detail
+        .map((item) => {
+          if (typeof item === "string") return item;
+          return item?.msg || "Invalid input";
+        })
+        .join(", ");
+    }
+
+    if (detail && typeof detail === "object") {
+      return detail.msg || JSON.stringify(detail);
+    }
+
+    if (typeof message === "string") {
+      return message;
+    }
+
+    if (typeof err.message === "string") {
+      return err.message;
+    }
+
+    return fallback;
   };
 
   // Fetch assets from backend.
   const fetchAssets = async () => {
     const response = await API.get("/assets");
 
-    const backendAssets = response.data.assets || [];
+    const backendAssets = Array.isArray(response.data)
+      ? response.data
+      : response.data.assets || [];
 
     const formattedAssets = backendAssets
       .filter((asset) => asset.name || asset.asset_name)
@@ -62,18 +100,22 @@ function AssetInventory() {
     setAssets(formattedAssets);
   };
 
+  // Load assets when the page opens.
   useEffect(() => {
     const loadAssets = async () => {
       try {
         setLoading(true);
         setError("");
+
         await fetchAssets();
       } catch (err) {
         console.error("Could not fetch assets:", err);
 
         setError(
-          err.response?.data?.detail ||
-          "Could not load assets from the backend."
+          getErrorMessage(
+            err,
+            "Could not load assets from the backend."
+          )
         );
       } finally {
         setLoading(false);
@@ -91,68 +133,59 @@ function AssetInventory() {
 
     const formData = new FormData(e.target);
 
-    const name = formData.get("name");
-    const category = formData.get("type");
-    const algorithm = formData.get("algorithm");
-    const system = formData.get("system");
+    const payload = {
+      name: String(formData.get("name") || "").trim(),
+      algorithm: String(formData.get("algorithm") || "").trim(),
+      category: String(formData.get("type") || "").trim(),
+      system: String(formData.get("system") || "").trim(),
+    };
+
+    if (
+      !payload.name ||
+      !payload.algorithm ||
+      !payload.category ||
+      !payload.system
+    ) {
+      setError("Please fill in all four fields.");
+      return;
+    }
 
     try {
       setLoading(true);
 
       if (editingAsset) {
-        // PUT request: update an existing backend asset.
+        // Update an existing asset.
         if (editingAsset.backendId === null) {
           throw new Error(
             "This asset does not have a valid backend ID. Refresh the inventory and try again."
           );
         }
 
-        const updatePayload = {
-          name,
-          algorithm,
-          category,
-          system,
-        };
-
         await API.put(
           `/assets/${editingAsset.backendId}`,
-          updatePayload
+          payload
         );
-
-        // Refresh the inventory after successful update.
-        await fetchAssets();
-
       } else {
-        // POST request: add a new asset.
-        const payload = {
-          asset_name: name,
-          algorithm,
-          key_length: Number(formData.get("key_length")),
-          data_sensitivity: formData.get("data_sensitivity"),
-          pqc_migration_status: formData.get(
-            "pqc_migration_status"
-          ),
-        };
-
+        // Add a new asset using the backend's required schema.
         await API.post("/assets", payload);
-
-        // Fetch the backend-generated ID and saved data.
-        await fetchAssets();
       }
+
+      // Refresh inventory after successful operation.
+      await fetchAssets();
 
       setShowAddForm(false);
       setEditingAsset(null);
       setSearchTerm("");
       setRiskFilter("All");
-
+      setError("");
     } catch (err) {
       console.error("Asset saving failed:", err);
 
       setError(
-        err.response?.data?.detail ||
-        err.response?.data?.message ||
-        err.message ||
-        "Could not save the asset."
+        getErrorMessage(
+          err,
+          "Could not save the asset."
+        )
       );
     } finally {
       setLoading(false);
@@ -185,24 +218,24 @@ function AssetInventory() {
           (item) => item.backendId !== asset.backendId
         )
       );
-
     } catch (err) {
       console.error("Asset deletion failed:", err);
 
       setError(
-        err.response?.data?.detail ||
-        err.response?.data?.message ||
-        "Could not delete the asset from the backend."
+        getErrorMessage(
+          err,
+          "Could not delete the asset from the backend."
+        )
       );
     } finally {
       setLoading(false);
     }
   };
 
-  // Search and filter.
+  // Search and filter assets.
   const filteredAssets = assets.filter((asset) => {
     const matchesSearch =
-      `${asset.name} ${asset.type} ${asset.algorithm}`
+      `${asset.name} ${asset.type} ${asset.algorithm} ${asset.system}`
         .toLowerCase()
         .includes(searchTerm.toLowerCase());
 
@@ -253,6 +286,7 @@ function AssetInventory() {
             onSubmit={handleAddAsset}
             className="grid grid-cols-1 sm:grid-cols-2 gap-5"
           >
+            {/* Asset Name */}
             <div>
               <label className="block text-sm font-medium mb-2">
                 Asset Name
@@ -268,6 +302,7 @@ function AssetInventory() {
               />
             </div>
 
+            {/* Category */}
             <div>
               <label className="block text-sm font-medium mb-2">
                 Category
@@ -290,6 +325,7 @@ function AssetInventory() {
               </select>
             </div>
 
+            {/* Algorithm */}
             <div>
               <label className="block text-sm font-medium mb-2">
                 Cryptographic Algorithm
@@ -305,6 +341,7 @@ function AssetInventory() {
               />
             </div>
 
+            {/* System */}
             <div>
               <label className="block text-sm font-medium mb-2">
                 System
@@ -320,65 +357,14 @@ function AssetInventory() {
               />
             </div>
 
-            {!editingAsset && (
-              <>
-                <div>
-                  <label className="block text-sm font-medium mb-2">
-                    Key Length
-                  </label>
-
-                  <input
-                    name="key_length"
-                    type="number"
-                    min="1"
-                    placeholder="e.g. 2048"
-                    required
-                    className="w-full border border-slate-200 rounded-lg p-3 text-sm outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium mb-2">
-                    Data Sensitivity
-                  </label>
-
-                  <select
-                    name="data_sensitivity"
-                    defaultValue="high"
-                    required
-                    className="w-full border border-slate-200 rounded-lg p-3 text-sm"
-                  >
-                    <option value="high">High</option>
-                    <option value="medium">Medium</option>
-                    <option value="low">Low</option>
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium mb-2">
-                    PQC Migration Status
-                  </label>
-
-                  <select
-                    name="pqc_migration_status"
-                    defaultValue="pending"
-                    required
-                    className="w-full border border-slate-200 rounded-lg p-3 text-sm"
-                  >
-                    <option value="pending">Pending</option>
-                    <option value="in_progress">In Progress</option>
-                    <option value="completed">Completed</option>
-                  </select>
-                </div>
-              </>
-            )}
-
+            {/* Error Message */}
             {error && (
               <div className="sm:col-span-2 bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm">
                 {error}
               </div>
             )}
 
+            {/* Form Buttons */}
             <div className="sm:col-span-2 flex gap-3">
               <button
                 type="submit"
@@ -399,6 +385,7 @@ function AssetInventory() {
                   setEditingAsset(null);
                   setError("");
                 }}
+                disabled={loading}
                 className="border border-slate-200 px-5 py-3 rounded-lg text-sm text-slate-600"
               >
                 Cancel
@@ -425,6 +412,7 @@ function AssetInventory() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
         <div className="bg-white p-5 rounded-xl border border-slate-200">
           <p className="text-sm text-slate-500">Total Assets</p>
+
           <h2 className="text-2xl font-bold mt-2 text-slate-800">
             {assets.length}
           </h2>
@@ -434,6 +422,7 @@ function AssetInventory() {
           <p className="text-sm text-slate-500">
             High Sensitivity Assets
           </p>
+
           <h2 className="text-2xl font-bold mt-2 text-red-600">
             {assets.filter((asset) => asset.risk === "High").length}
           </h2>
@@ -441,6 +430,7 @@ function AssetInventory() {
 
         <div className="bg-white p-5 rounded-xl border border-slate-200">
           <p className="text-sm text-slate-500">Protected Assets</p>
+
           <h2 className="text-2xl font-bold mt-2 text-green-600">
             {assets.filter((asset) => asset.status === "Protected").length}
           </h2>
@@ -569,6 +559,7 @@ function AssetInventory() {
                           setError("");
                           setShowAddForm(true);
                         }}
+                        disabled={loading}
                         className="text-blue-600 hover:text-blue-800 text-sm font-medium ml-3"
                       >
                         Edit
