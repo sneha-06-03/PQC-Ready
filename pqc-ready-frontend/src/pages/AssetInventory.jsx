@@ -7,6 +7,7 @@ import {
   Filter,
   Server,
   ShieldAlert,
+  RefreshCw,
 } from "lucide-react";
 
 import API from "../services/api";
@@ -17,56 +18,30 @@ function AssetInventory() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [editingAsset, setEditingAsset] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [assessingId, setAssessingId] = useState(null);
   const [error, setError] = useState("");
   const [assets, setAssets] = useState([]);
 
-  // Convert backend data into frontend format.
-  const formatAsset = (asset, index) => {
-    const sensitivity = asset.data_sensitivity || "medium";
-    const migrationStatus =
-      asset.pqc_migration_status || "pending";
-
-    return {
-      id: asset.id ?? `${asset.name || asset.asset_name}-${index}`,
-      backendId: asset.id ?? null,
-      name: asset.name || asset.asset_name || "Unnamed Asset",
-      type: asset.category || asset.asset_type || "Other",
-      algorithm: asset.algorithm || "Not specified",
-      keyLength: asset.key_length || "",
-      dataSensitivity: sensitivity,
-      migrationStatus,
-      system: asset.system || "",
-
-      risk:
-        sensitivity.charAt(0).toUpperCase() +
-        sensitivity.slice(1),
-
-      status:
-        migrationStatus === "completed"
-          ? "Protected"
-          : migrationStatus === "in_progress"
-            ? "In Progress"
-            : "Needs Migration",
-
-      riskScore: asset.pqc_risk_score ?? null,
-    };
+  // Extract key size from algorithm names such as RSA-2048 or AES-256.
+  const getKeySize = (algorithm) => {
+    const match = String(algorithm || "").match(/\d{3,5}/);
+    return match ? Number(match[0]) : null;
   };
 
-  // Convert backend errors into readable text.
+  // Convert backend errors into readable messages.
   const getErrorMessage = (err, fallback) => {
     const detail = err.response?.data?.detail;
     const message = err.response?.data?.message;
 
-    if (typeof detail === "string") {
-      return detail;
-    }
+    if (typeof detail === "string") return detail;
 
     if (Array.isArray(detail)) {
       return detail
-        .map((item) => {
-          if (typeof item === "string") return item;
-          return item?.msg || "Invalid input";
-        })
+        .map((item) =>
+          typeof item === "string"
+            ? item
+            : item?.msg || "Invalid input"
+        )
         .join(", ");
     }
 
@@ -74,18 +49,71 @@ function AssetInventory() {
       return detail.msg || JSON.stringify(detail);
     }
 
-    if (typeof message === "string") {
-      return message;
-    }
+    if (typeof message === "string") return message;
 
-    if (typeof err.message === "string") {
-      return err.message;
-    }
+    if (typeof err.message === "string") return err.message;
 
     return fallback;
   };
 
-  // Fetch assets from backend.
+  // Call the backend risk assessment engine.
+  const assessAsset = async (asset) => {
+    try {
+      const response = await API.post("/assess", {
+        algorithm: asset.algorithm,
+        key_size: getKeySize(asset.algorithm),
+      });
+
+      return {
+        riskScore: response.data.risk_score ?? null,
+        assessmentStatus: response.data.status || "Unknown",
+        recommendation: response.data.recommendation || "",
+      };
+    } catch (err) {
+      console.error(
+        `Risk assessment failed for ${asset.name}:`,
+        err
+      );
+
+      return {
+        riskScore: null,
+        assessmentStatus: "Not assessed",
+        recommendation: getErrorMessage(
+          err,
+          "Risk assessment could not be completed."
+        ),
+      };
+    }
+  };
+
+  // Convert backend asset data into frontend format.
+  const formatAsset = (asset, index, assessment = {}) => {
+    return {
+      id: asset.id ?? `${asset.name}-${index}`,
+      backendId: asset.id ?? null,
+      name: asset.name || asset.asset_name || "Unnamed Asset",
+      type: asset.category || asset.asset_type || "Other",
+      algorithm: asset.algorithm || "Not specified",
+      system: asset.system || "",
+
+      riskScore:
+        assessment.riskScore ??
+        asset.pqc_risk_score ??
+        null,
+
+      assessmentStatus:
+        assessment.assessmentStatus ||
+        asset.assessment_status ||
+        "Not assessed",
+
+      recommendation:
+        assessment.recommendation ||
+        asset.recommendation ||
+        "",
+    };
+  };
+
+  // Fetch assets and assess their risks.
   const fetchAssets = async () => {
     const response = await API.get("/assets");
 
@@ -93,11 +121,26 @@ function AssetInventory() {
       ? response.data
       : response.data.assets || [];
 
-    const formattedAssets = backendAssets
-      .filter((asset) => asset.name || asset.asset_name)
-      .map((asset, index) => formatAsset(asset, index));
+    const validAssets = backendAssets.filter(
+      (asset) => asset.name || asset.asset_name
+    );
 
-    setAssets(formattedAssets);
+    // Assess each asset independently.
+    const results = await Promise.all(
+      validAssets.map(async (asset) => {
+        const assessment = await assessAsset(asset);
+
+        return {
+          ...formatAsset(
+            asset,
+            validAssets.indexOf(asset),
+            assessment
+          ),
+        };
+      })
+    );
+
+    setAssets(results);
   };
 
   // Load assets when the page opens.
@@ -128,7 +171,6 @@ function AssetInventory() {
   // Add a new asset or update an existing asset.
   const handleAddAsset = async (e) => {
     e.preventDefault();
-
     setError("");
 
     const formData = new FormData(e.target);
@@ -154,10 +196,9 @@ function AssetInventory() {
       setLoading(true);
 
       if (editingAsset) {
-        // Update an existing asset.
         if (editingAsset.backendId === null) {
           throw new Error(
-            "This asset does not have a valid backend ID. Refresh the inventory and try again."
+            "This asset does not have a valid backend ID. Refresh and try again."
           );
         }
 
@@ -166,11 +207,9 @@ function AssetInventory() {
           payload
         );
       } else {
-        // Add a new asset using the backend's required schema.
         await API.post("/assets", payload);
       }
 
-      // Refresh inventory after successful operation.
       await fetchAssets();
 
       setShowAddForm(false);
@@ -182,14 +221,32 @@ function AssetInventory() {
       console.error("Asset saving failed:", err);
 
       setError(
-        getErrorMessage(
-          err,
-          "Could not save the asset."
-        )
+        getErrorMessage(err, "Could not save the asset.")
       );
     } finally {
       setLoading(false);
     }
+  };
+
+  // Manually reassess an individual asset.
+  const handleAssessAsset = async (asset) => {
+    setAssessingId(asset.id);
+    setError("");
+
+    const result = await assessAsset(asset);
+
+    setAssets((previousAssets) =>
+      previousAssets.map((item) =>
+        item.id === asset.id
+          ? {
+              ...item,
+              ...result,
+            }
+          : item
+      )
+    );
+
+    setAssessingId(null);
   };
 
   // Delete an asset through the backend.
@@ -202,7 +259,7 @@ function AssetInventory() {
 
     if (asset.backendId === null) {
       setError(
-        "This asset does not have a valid backend ID. Refresh the inventory and try again."
+        "This asset does not have a valid backend ID. Refresh and try again."
       );
       return;
     }
@@ -224,13 +281,46 @@ function AssetInventory() {
       setError(
         getErrorMessage(
           err,
-          "Could not delete the asset from the backend."
+          "Could not delete the asset."
         )
       );
     } finally {
       setLoading(false);
     }
   };
+
+  // Refresh inventory and risk assessments.
+  const handleRefresh = async () => {
+    try {
+      setLoading(true);
+      setError("");
+      await fetchAssets();
+    } catch (err) {
+      setError(
+        getErrorMessage(err, "Could not refresh assets.")
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Calculate dashboard statistics using actual assessment results.
+  const assessedAssets = assets.filter(
+    (asset) => asset.riskScore !== null
+  );
+
+  const highRiskAssets = assets.filter((asset) =>
+    String(asset.assessmentStatus).toLowerCase().includes("high")
+  );
+
+  // Build available risk filters from actual backend responses.
+  const riskStatuses = [
+    ...new Set(
+      assets
+        .map((asset) => asset.assessmentStatus)
+        .filter((status) => status !== "Not assessed")
+    ),
+  ];
 
   // Search and filter assets.
   const filteredAssets = assets.filter((asset) => {
@@ -240,7 +330,8 @@ function AssetInventory() {
         .includes(searchTerm.toLowerCase());
 
     const matchesRisk =
-      riskFilter === "All" || asset.risk === riskFilter;
+      riskFilter === "All" ||
+      asset.assessmentStatus === riskFilter;
 
     return matchesSearch && matchesRisk;
   });
@@ -260,17 +351,28 @@ function AssetInventory() {
           </p>
         </div>
 
-        <button
-          onClick={() => {
-            setEditingAsset(null);
-            setError("");
-            setShowAddForm(true);
-          }}
-          className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-lg text-sm font-medium"
-        >
-          <Plus size={18} />
-          Add New Asset
-        </button>
+        <div className="flex flex-wrap gap-3">
+          <button
+            onClick={handleRefresh}
+            disabled={loading}
+            className="flex items-center justify-center gap-2 border border-slate-200 hover:bg-slate-50 px-4 py-3 rounded-lg text-sm font-medium text-slate-700 disabled:opacity-50"
+          >
+            <RefreshCw size={17} />
+            Refresh
+          </button>
+
+          <button
+            onClick={() => {
+              setEditingAsset(null);
+              setError("");
+              setShowAddForm(true);
+            }}
+            className="flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-lg text-sm font-medium"
+          >
+            <Plus size={18} />
+            Add New Asset
+          </button>
+        </div>
       </div>
 
       {/* Add / Edit Form */}
@@ -286,7 +388,6 @@ function AssetInventory() {
             onSubmit={handleAddAsset}
             className="grid grid-cols-1 sm:grid-cols-2 gap-5"
           >
-            {/* Asset Name */}
             <div>
               <label className="block text-sm font-medium mb-2">
                 Asset Name
@@ -302,7 +403,6 @@ function AssetInventory() {
               />
             </div>
 
-            {/* Category */}
             <div>
               <label className="block text-sm font-medium mb-2">
                 Category
@@ -325,7 +425,6 @@ function AssetInventory() {
               </select>
             </div>
 
-            {/* Algorithm */}
             <div>
               <label className="block text-sm font-medium mb-2">
                 Cryptographic Algorithm
@@ -334,14 +433,17 @@ function AssetInventory() {
               <input
                 name="algorithm"
                 type="text"
-                placeholder="e.g. RSA-2048"
+                placeholder="e.g. RSA-2048, AES-256"
                 defaultValue={editingAsset?.algorithm || ""}
                 required
                 className="w-full border border-slate-200 rounded-lg p-3 text-sm outline-none"
               />
+
+              <p className="text-xs text-slate-400 mt-1">
+                Include the key size in the algorithm name when available.
+              </p>
             </div>
 
-            {/* System */}
             <div>
               <label className="block text-sm font-medium mb-2">
                 System
@@ -357,14 +459,12 @@ function AssetInventory() {
               />
             </div>
 
-            {/* Error Message */}
             {error && (
               <div className="sm:col-span-2 bg-red-50 border border-red-200 text-red-700 rounded-lg p-3 text-sm">
                 {error}
               </div>
             )}
 
-            {/* Form Buttons */}
             <div className="sm:col-span-2 flex gap-3">
               <button
                 type="submit"
@@ -398,7 +498,7 @@ function AssetInventory() {
       {/* Loading and Error Messages */}
       {loading && !showAddForm && (
         <p className="text-sm text-blue-600">
-          Processing request...
+          Loading assets and calculating risk assessments...
         </p>
       )}
 
@@ -412,27 +512,22 @@ function AssetInventory() {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
         <div className="bg-white p-5 rounded-xl border border-slate-200">
           <p className="text-sm text-slate-500">Total Assets</p>
-
           <h2 className="text-2xl font-bold mt-2 text-slate-800">
             {assets.length}
           </h2>
         </div>
 
         <div className="bg-white p-5 rounded-xl border border-slate-200">
-          <p className="text-sm text-slate-500">
-            High Sensitivity Assets
-          </p>
-
+          <p className="text-sm text-slate-500">High Risk Assets</p>
           <h2 className="text-2xl font-bold mt-2 text-red-600">
-            {assets.filter((asset) => asset.risk === "High").length}
+            {highRiskAssets.length}
           </h2>
         </div>
 
         <div className="bg-white p-5 rounded-xl border border-slate-200">
-          <p className="text-sm text-slate-500">Protected Assets</p>
-
+          <p className="text-sm text-slate-500">Assessed Assets</p>
           <h2 className="text-2xl font-bold mt-2 text-green-600">
-            {assets.filter((asset) => asset.status === "Protected").length}
+            {assessedAssets.length}
           </h2>
         </div>
       </div>
@@ -459,10 +554,13 @@ function AssetInventory() {
             onChange={(e) => setRiskFilter(e.target.value)}
             className="outline-none text-sm text-slate-600 bg-white"
           >
-            <option value="All">All Sensitivities</option>
-            <option value="High">High Sensitivity</option>
-            <option value="Medium">Medium Sensitivity</option>
-            <option value="Low">Low Sensitivity</option>
+            <option value="All">All Risk Assessments</option>
+
+            {riskStatuses.map((status) => (
+              <option key={status} value={status}>
+                {status}
+              </option>
+            ))}
           </select>
         </div>
       </div>
@@ -486,9 +584,9 @@ function AssetInventory() {
                 <th className="px-6 py-4">Asset Name</th>
                 <th className="px-6 py-4">Asset Type</th>
                 <th className="px-6 py-4">Algorithm</th>
-                <th className="px-6 py-4">Sensitivity</th>
-                <th className="px-6 py-4">PQC Risk Score</th>
-                <th className="px-6 py-4">Status</th>
+                <th className="px-6 py-4">Risk Score</th>
+                <th className="px-6 py-4">Assessment</th>
+                <th className="px-6 py-4">Recommendation</th>
                 <th className="px-6 py-4">Actions</th>
               </tr>
             </thead>
@@ -517,53 +615,58 @@ function AssetInventory() {
                       {asset.algorithm}
                     </td>
 
-                    <td className="px-6 py-4">
-                      <span
-                        className={`px-3 py-1 rounded-full text-xs font-medium ${
-                          asset.risk === "High"
-                            ? "bg-red-100 text-red-700"
-                            : asset.risk === "Medium"
-                              ? "bg-amber-100 text-amber-700"
-                              : "bg-green-100 text-green-700"
-                        }`}
-                      >
-                        {asset.risk}
-                      </span>
-                    </td>
-
                     <td className="px-6 py-4 text-sm font-semibold text-slate-700">
                       {asset.riskScore !== null
-                        ? `${asset.riskScore}/100`
+                        ? asset.riskScore
                         : "Not assessed"}
                     </td>
 
                     <td className="px-6 py-4">
-                      <span className="text-xs text-slate-600 flex items-center gap-2">
-                        <ShieldAlert size={15} />
-                        {asset.status}
+                      <span className="text-xs font-medium text-slate-700">
+                        {asset.assessmentStatus}
                       </span>
                     </td>
 
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <button
-                        onClick={() => handleDeleteAsset(asset)}
-                        disabled={loading}
-                        className="text-red-600 hover:text-red-800 disabled:opacity-50 text-sm font-medium"
-                      >
-                        Delete
-                      </button>
+                    <td className="px-6 py-4 text-xs text-slate-600 min-w-48 max-w-xs">
+                      {asset.recommendation || "No recommendation available."}
+                    </td>
 
-                      <button
-                        onClick={() => {
-                          setEditingAsset(asset);
-                          setError("");
-                          setShowAddForm(true);
-                        }}
-                        disabled={loading}
-                        className="text-blue-600 hover:text-blue-800 text-sm font-medium ml-3"
-                      >
-                        Edit
-                      </button>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <div className="flex flex-col gap-2">
+                        <button
+                          onClick={() => handleAssessAsset(asset)}
+                          disabled={
+                            loading || assessingId === asset.id
+                          }
+                          className="text-indigo-600 hover:text-indigo-800 disabled:opacity-50 text-sm font-medium text-left"
+                        >
+                          {assessingId === asset.id
+                            ? "Assessing..."
+                            : asset.riskScore !== null
+                              ? "Reassess"
+                              : "Assess"}
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            setEditingAsset(asset);
+                            setError("");
+                            setShowAddForm(true);
+                          }}
+                          disabled={loading}
+                          className="text-blue-600 hover:text-blue-800 text-sm font-medium text-left"
+                        >
+                          Edit
+                        </button>
+
+                        <button
+                          onClick={() => handleDeleteAsset(asset)}
+                          disabled={loading}
+                          className="text-red-600 hover:text-red-800 disabled:opacity-50 text-sm font-medium text-left"
+                        >
+                          Delete
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))
